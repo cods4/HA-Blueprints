@@ -1,0 +1,778 @@
+blueprint:
+  name: IKEA Bilresa Dual Button + Wall Switch
+  author: cods4 (based on Kaito-Mez's IKEA Bilresa Dual Button Light Dimmer Remote)
+  description: |
+    Use IKEA Bilresa Dual Button as a light remote, plus optional wall switch(es)
+    (e.g. Shelly relays/dimmers/i3 in detached or momentary mode) controlling the
+    same light(s), so one automation serves a whole room.
+
+    Credit: based on Kaito-Mez's "IKEA Bilresa Dual Button Light Dimmer Remote"
+    (https://github.com/Kaito-Mez/HA-Blueprints, MIT licence; blueprint file as of upstream
+    commit 53b30024, 2026-03-24). Remote behaviour and inputs are unchanged from the original,
+    so existing automations can switch to this blueprint without re-entering inputs.
+    
+    Single presses turn the light(s) on/off.
+    Double presses and Button holds can be configured to either adjust brightness or trigger custom actions.
+
+    Double Press Brightness Control: Adjusts brightness by a set percentage with each double press.
+    Press and Hold Brightness Control: Smoothly ramps brightness up or down while the button is held.
+    
+    *Fields marked with * require the light entity selected to support transitions to function as expected.
+
+    Supported setups (all wall-switch inputs are optional and default to empty):
+    1. Remote only: fill in the remote and light inputs; leave both wall sections empty.
+    2. Remote + one toggle wall switch (most rooms): use the "Wall Switch (toggle)" section.
+       Each press toggles the light(s) as a group.
+    3. Remote + up/down wall switches (e.g. Lounge, Dimmer 2 with two detached inputs): use
+       the "Wall Switches (up/down)" section. Up single press = on, down single press = off;
+       up/down long press = dim up/down (never turns the light off: clamps at 1%).
+       Optional hold sensors (the input's binary_sensor) give a smooth ramp until release,
+       using the same dimming speed / extrapolation settings as the remote. Without a hold
+       sensor, or if the sensor is not "on" when the long event arrives, a long press does one
+       fixed step (default 20%). Only use hold sensors once you've confirmed they turn on while
+       the switch is held and off within about 1 s of release; the ramp stops after 30 s.
+    Setups 2 and 3 can be combined (e.g. a toggle switch at one door, up/down at another).
+
+    Wall switch (toggle) details:
+    - Event entities (Shelly Gen1 detached/momentary inputs: single/long; Shelly Gen2+
+      button inputs: single_push/long_push/...; Shelly i3: single/double/triple/long...).
+      A press of a selected event type toggles the light(s) as a group: if any is on,
+      all turn off, otherwise all turn on. Optional long-press action.
+    - Binary sensors for toggle/rocker (switch-type) inputs: every on/off change toggles.
+    - Do not select both the event entity and the binary_sensor of the same Shelly input,
+      and do not use a binary_sensor for a momentary (push) switch, or one press toggles twice.
+    - Automation mode stays "single" (as upstream). "restart" would break the press-and-hold
+      dimmer: the remote's long_release event re-triggers the automation and would abort the
+      hold run before it sets the final brightness. Side effect: a wall press during an active
+      hold (up to 30 s) is ignored.
+
+    Original blueprint: https://github.com/Kaito-Mez/HA-Blueprints/blob/main/IKEA/IKEA_Bilresa_Dual_Button.yaml
+  source_url: https://github.com/cods4/HA-Blueprints/blob/main/IKEA/IKEA_Bilresa_Dual_Button_Wall_Switch.yaml
+  domain: automation
+  input:
+    remote_up:
+      name: Bilresa Remote - Up button event entity
+      selector:
+        entity:
+          domain: event
+    remote_down:
+      name: Bilresa Remote - Down button event entity
+      selector:
+        entity:
+          domain: event
+    light_entity:
+      name: Light Entity to Control
+      description: Create a Light Group Helper to control more than one light.
+      selector:
+        entity:
+          domain: light
+    double_click_mode:
+      name: Double Click Behaviour
+      description: >
+        Choose the double click behaviour
+      default: none
+      selector:
+        select:
+          options:
+            - label: None
+              value: none
+            - label: Brightness Stepper (Options Below)
+              value: brightness
+            - label: Custom Actions (Configuration Below Required)
+              value: custom
+    stepper_options:
+      name: Brightness Stepper Options
+      collapsed: true
+      input:
+        brightness_step_size:
+          name: Brightness Step Percent
+          description: How much to change the brightness per increment (Default 14%)
+          default: 14
+          selector:
+            number:
+              min: 1
+              max: 50
+              step: 1
+              unit_of_measurement: "%"
+        brightness_step_transition:
+          name: Brightness Transition Time*
+          description: Smoothness of each step (Default 0.4s)
+          default: 0.4
+          selector:
+            number:
+              min: 0
+              max: 1.5
+              step: 0.1
+              unit_of_measurement: s
+    custom_double_click_actions:
+      name: Configure Double Click Custom Actions
+      collapsed: true
+      input:
+        double_click_up_action:
+          name: Double Click Up Action
+          default: []
+          selector:
+            action: {}
+        double_click_down_action:
+          name: Double Click Down Action
+          default: []
+          selector:
+            action: {}
+    press_and_hold_mode:
+      name: Press and Hold Behaviour
+      description: >
+        Choose the press and hold behaviour
+      default: none
+      selector:
+        select:
+          options:
+            - label: None
+              value: none
+            - label: Brightness Dimmer* (Options Below)
+              value: brightness
+            - label: Custom Actions (Configuration Below Required)
+              value: custom
+    dimmer_options:
+      name: Brightness Dimmer Options
+      collapsed: true
+      input:
+        brightness_dimming_speed:
+          name: Dimming Speed*
+          description: How fast the brightness should change (Default 100%)
+          default: 100
+          selector:
+            number:
+              min: 50
+              max: 200
+              step: 1
+              unit_of_measurement: "%"
+    advanced_dimming_options:
+      name: Advanced Dimmer Options
+      description: |
+        Leave these as default unless you notice the brightness rubberbanding up and down when you release the button.
+        This is caused by delays in the light reporting its brightness back to Home Assistant.
+        Below are controls to help compensate for this limitation.
+      collapsed: true
+      input:
+        latency_compensation_offset:
+          name: Brightness Extrapolation Offset
+          description: |
+            Fine tune the brightness extrapolation. (Default 0.06s) 
+            
+            Increase slightly if you see it rubberband back when releasing the button.
+            Lower slightly if you see the light overshoot when releasing the button.
+          default: 0.06
+          selector:
+            number:
+              min: -0.2
+              max: 0.2
+              step: 0.005
+              unit_of_measurement: s
+        release_transition:
+          name: Release Transition Interval*
+          description: |
+            Smoothness of the transition to the extrapolated brightness when you release the button. (Default 0.2s)
+
+            Increase for a smoother transition at the cost of perceived latency.
+            Decrease for a more abrupt transition that may feel snappier.
+            Set to 0 for no transition.
+          default: 0.2
+          selector:
+            number:
+              min: 0
+              max: 1.5
+              step: 0.05
+              unit_of_measurement: s
+    custom_press_and_hold_actions:
+      name: Configure Press and Hold Custom Actions
+      collapsed: true
+      input:
+        hold_up_action:
+          name: Hold Up Action
+          default: []
+          selector:
+            action: {}
+        hold_down_action:
+          name: Hold Down Action
+          default: []
+          selector:
+            action: {}
+    wall_switch:
+      name: Wall Switch (toggle, optional)
+      description: >
+        Optional wall switch inputs (e.g. Shelly in detached/momentary mode) that
+        control the same light(s). Leave empty to use the remote only.
+      collapsed: true
+      input:
+        wall_switch_lights:
+          name: Wall switch lights (optional)
+          description: >
+            Light(s) the wall switch toggles as a group. Leave empty to use the
+            "Light Entity to Control" above.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        wall_switch_events:
+          name: Wall switch event entities (momentary/detached)
+          description: >
+            Shelly event entities for the wall switch, e.g. event.<device>_input or
+            event.<device>_input_1. Any number allowed.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: event
+        wall_switch_event_types:
+          name: Event types that toggle
+          description: >
+            Shelly Gen1 (1PM, 2.5, Dimmer 2, RGBW2, i3) uses "single"/"long"; Gen2+ (Plus/Mini)
+            uses "single_push"/"long_push"/"btn_down"; Shelly Button1 over MQTT uses "S"/"L".
+            Don't select both single_push and btn_down or one press toggles twice.
+          default:
+            - single
+            - single_push
+            - S
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - single
+                - single_push
+                - btn_down
+                - btn_up
+                - double
+                - double_push
+                - S
+        wall_switch_long_events:
+          name: Event types for long press action
+          default:
+            - long
+            - long_push
+            - L
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - long
+                - long_push
+                - L
+        wall_switch_long_action:
+          name: Long press action
+          description: Optional action on wall switch long press (event entities only).
+          default: []
+          selector:
+            action: {}
+        wall_switch_binary_sensors:
+          name: Wall switch binary sensors (toggle/rocker inputs)
+          description: >
+            Shelly input binary_sensors from toggle-style (switch-type) inputs; every
+            on/off change toggles the light(s). Not for momentary push switches.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+        wall_switch_action:
+          name: Custom press action (optional)
+          description: If set, runs instead of the built-in group toggle.
+          default: []
+          selector:
+            action: {}
+    wall_updown:
+      name: Wall Switches (up/down, optional)
+      description: >
+        Optional pair of wall switches that behave like the remote's two buttons:
+        Up = on / dim up, Down = off / dim down. Controls the lights chosen in
+        "Wall switch lights" (toggle section), or "Light Entity to Control" if that is empty.
+      collapsed: true
+      input:
+        wall_up_events:
+          name: Up switch event entities
+          description: e.g. event.<dimmer>_input_1. Single press turns the light(s) on; long press dims up.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: event
+        wall_down_events:
+          name: Down switch event entities
+          description: e.g. event.<dimmer>_input_2. Single press turns the light(s) off; long press dims down (min 1%).
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: event
+        wall_updown_press_types:
+          name: Up/down event types for on/off
+          description: Same values as the toggle section (Gen1 "single", Gen2+ "single_push", Button1 "S").
+          default:
+            - single
+            - single_push
+            - S
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - single
+                - single_push
+                - btn_down
+                - btn_up
+                - double
+                - double_push
+                - S
+        wall_updown_long_types:
+          name: Up/down event types for dimming
+          default:
+            - long
+            - long_push
+            - L
+          selector:
+            select:
+              multiple: true
+              custom_value: true
+              options:
+                - long
+                - long_push
+                - L
+        wall_up_hold_sensors:
+          name: Up switch hold sensor (optional)
+          description: >
+            binary_sensor that is "on" while the up switch is physically held (e.g. the Shelly
+            input binary_sensor of the same detached input). Enables a smooth ramp until release.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+        wall_down_hold_sensors:
+          name: Down switch hold sensor (optional)
+          description: As above, for the down switch.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+        wall_long_step:
+          name: Long press step (no hold sensor)
+          description: Brightness change per long press when no hold sensor is used / held.
+          default: 20
+          selector:
+            number:
+              min: 1
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+variables:
+  light_entity: !input light_entity
+
+  double_click_mode: !input double_click_mode
+  brightness_step_size: !input brightness_step_size
+  brightness_step_transition: !input brightness_step_transition
+
+  press_and_hold_mode: !input press_and_hold_mode
+
+  brightness_dimming_speed: !input brightness_dimming_speed
+
+  release_transition: !input release_transition
+  latency_compensation_offset: !input latency_compensation_offset
+
+  base_ramp_time: 3 # The time it takes to go from 0 to 255 brightness at 100% dimming speed
+  speed_scalar: "{{ brightness_dimming_speed / 100 }}"
+  scaled_ramp_time: "{{ base_ramp_time / speed_scalar }}"
+
+  # Wall switch
+  wall_switch_lights_input: !input wall_switch_lights
+  wall_lights: >
+    {% set l = wall_switch_lights_input %}
+    {% if l is string %}{% set l = [l] %}{% endif %}
+    {{ l if l | length > 0 else [light_entity] }}
+  wall_toggle_types: !input wall_switch_event_types
+  wall_long_types: !input wall_switch_long_events
+  wall_custom_action: !input wall_switch_action
+  wall_ref: "{{ wall_lights[0] }}"
+  wall_updown_press_types: !input wall_updown_press_types
+  wall_updown_long_types: !input wall_updown_long_types
+  wall_up_hold: !input wall_up_hold_sensors
+  wall_down_hold: !input wall_down_hold_sensors
+  wall_long_step: !input wall_long_step
+  wall_min_brightness: 3 # 1% of 255, rounded up; dimming down never goes below this
+
+triggers:  
+  - trigger: state
+    entity_id: !input remote_up
+    id: press_up
+    not_from: unavailable
+    not_to: unavailable
+  - trigger: state
+    entity_id: !input remote_down
+    id: press_down
+    not_from: unavailable
+    not_to: unavailable
+  - trigger: state
+    entity_id: !input remote_up
+    attribute: event_type
+    to: long_press
+    id: hold_up
+    not_from: unavailable
+  - trigger: state
+    entity_id: !input remote_down
+    attribute: event_type
+    to: long_press
+    id: hold_down
+    not_from: unavailable
+  # Wall switch triggers (no-op when the inputs are left empty)
+  - trigger: state
+    entity_id: !input wall_switch_events
+    id: wall_event
+    not_from: unavailable
+    not_to: unavailable
+  - trigger: state
+    entity_id: !input wall_up_events
+    id: wall_up
+    not_from: unavailable
+    not_to: unavailable
+  - trigger: state
+    entity_id: !input wall_down_events
+    id: wall_down
+    not_from: unavailable
+    not_to: unavailable
+  - trigger: state
+    entity_id: !input wall_switch_binary_sensors
+    id: wall_binary
+    not_from:
+      - unavailable
+      - unknown
+    not_to:
+      - unavailable
+      - unknown
+
+mode: single # Keep single (see description; restart breaks hold-dimming). If the automation is triggered again while already running, the new trigger is ignored.
+max_exceeded: silent # Dont Log warning when the new trigger is dropped.
+
+actions:
+  - choose:
+      # Single Press UP Turns Light On
+      - conditions:
+          - condition: trigger
+            id: press_up
+          - condition: state
+            entity_id: !input remote_up
+            state:
+              - multi_press_1
+            attribute: event_type
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: !input light_entity
+              
+      # Single Press DOWN Turns Light Off
+      - conditions:
+          - condition: trigger
+            id: press_down
+          - condition: state
+            entity_id: !input remote_down
+            state:
+              - multi_press_1
+            attribute: event_type
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: !input light_entity
+
+      # Double Press UP
+      - conditions:
+          - condition: trigger
+            id: press_up
+          - condition: state
+            entity_id: !input remote_up
+            state:
+              - multi_press_2
+            attribute: event_type
+        sequence:
+          # Brightness Control
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ double_click_mode == 'brightness' }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness_step_pct: "{{ brightness_step_size }}"
+                      transition: "{{ brightness_step_transition }}"
+
+          # Custom Action
+          - choose: 
+              - conditions:
+                  - condition: template
+                    value_template: "{{ double_click_mode == 'custom' }}"
+                sequence: !input double_click_up_action
+      
+      # Double Press DOWN
+      - conditions:
+          - condition: trigger
+            id: press_down
+          - condition: state
+            entity_id: !input remote_down
+            state:
+              - multi_press_2
+            attribute: event_type
+        sequence:
+          # Brightness Control
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ double_click_mode == 'brightness' }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness_step_pct: "{{ brightness_step_size * -1 }}"
+                      transition: "{{ brightness_step_transition }}"
+          
+          # Custom Action
+          - choose: 
+              - conditions:
+                  - condition: template
+                    value_template: "{{ double_click_mode == 'custom' }}"
+                sequence: !input double_click_down_action
+      
+      # Hold UP
+      - conditions:
+          - condition: trigger
+            id: hold_up
+        sequence:
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ press_and_hold_mode == 'brightness' }}"
+                sequence:
+                  - if:
+                      - condition: state
+                        entity_id: !input light_entity
+                        state: "off"
+                    then:
+                      - action: light.turn_on
+                        target:
+                          entity_id: !input light_entity
+                        data:
+                          brightness_pct: 1
+                  - variables:
+                      hold_start_time: "{{ as_timestamp(now()) - latency_compensation_offset }}"
+                      hold_start_brightness: "{{ state_attr(light_entity, 'brightness') or 0 }}"
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness: 255
+                      transition: "{{ (1 - (hold_start_brightness / 255)) * scaled_ramp_time }}"
+                  - wait_for_trigger:
+                      - trigger: state
+                        entity_id: !input remote_up
+                        attribute: event_type
+                        to: long_release
+                    timeout: 30
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness: "{{ [hold_start_brightness + (255 / scaled_ramp_time * (as_timestamp(now()) - hold_start_time)), 255] | min }}"
+                      transition: "{{ release_transition }}"
+          # Custom Action
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ press_and_hold_mode == 'custom' }}"
+                sequence: !input hold_up_action
+
+      # Hold DOWN
+      - conditions:
+          - condition: trigger
+            id: hold_down
+        sequence:
+          # Smooth Brightness Control
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ press_and_hold_mode == 'brightness' }}"
+                sequence:
+                  - variables:
+                      hold_start_time: "{{ as_timestamp(now()) - latency_compensation_offset }}"
+                      hold_start_brightness: "{{ state_attr(light_entity, 'brightness') or 0 }}"
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness: 1 # We cant set brightness to 0 or it turns the light off. The release transition is able to turn it off anyway
+                      transition: "{{ (hold_start_brightness / 255) * scaled_ramp_time }}"
+                  - wait_for_trigger:
+                      - trigger: state
+                        entity_id: !input remote_down
+                        attribute: event_type
+                        to: long_release
+                    timeout: 30
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input light_entity
+                    data:
+                      brightness: "{{ [hold_start_brightness - (255 / scaled_ramp_time * (as_timestamp(now()) - hold_start_time)), 0] | max }}"
+                      transition: "{{ release_transition }}"
+          # Custom Action
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ press_and_hold_mode == 'custom' }}"
+                sequence: !input hold_down_action
+
+      # Wall switch press: group toggle (or custom action)
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ (trigger.id == 'wall_event'
+                  and trigger.to_state.attributes.event_type in wall_toggle_types)
+                 or trigger.id == 'wall_binary' }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ wall_custom_action | length > 0 }}"
+            then: !input wall_switch_action
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ wall_lights | select('is_state', 'on') | list | length > 0 }}"
+                then:
+                  - action: light.turn_off
+                    target:
+                      entity_id: "{{ wall_lights }}"
+                else:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ wall_lights }}"
+
+      # Wall switch long press
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.id == 'wall_event'
+                 and trigger.to_state.attributes.event_type in wall_long_types }}
+        sequence: !input wall_switch_long_action
+
+      # Up switch single press: on
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.id == 'wall_up'
+                 and trigger.to_state.attributes.event_type in wall_updown_press_types }}
+        sequence:
+          - action: light.turn_on
+            target:
+              entity_id: "{{ wall_lights }}"
+
+      # Down switch single press: off
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.id == 'wall_down'
+                 and trigger.to_state.attributes.event_type in wall_updown_press_types }}
+        sequence:
+          - action: light.turn_off
+            target:
+              entity_id: "{{ wall_lights }}"
+
+      # Up switch long press: dim up (smooth with hold sensor, else one step)
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.id == 'wall_up'
+                 and trigger.to_state.attributes.event_type in wall_updown_long_types }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ wall_up_hold | select('is_state', 'on') | list | length > 0 }}"
+            then:
+              - if:
+                  - condition: template
+                    value_template: "{{ is_state(wall_ref, 'off') }}"
+                then:
+                  - action: light.turn_on
+                    target:
+                      entity_id: "{{ wall_lights }}"
+                    data:
+                      brightness_pct: 1
+              - variables:
+                  hold_start_time: "{{ as_timestamp(now()) - latency_compensation_offset }}"
+                  hold_start_brightness: "{{ state_attr(wall_ref, 'brightness') or 0 }}"
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ wall_lights }}"
+                data:
+                  brightness: 255
+                  transition: "{{ (1 - (hold_start_brightness / 255)) * scaled_ramp_time }}"
+              - wait_template: "{{ wall_up_hold | select('is_state', 'on') | list | length == 0 }}"
+                timeout: 30
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ wall_lights }}"
+                data:
+                  brightness: "{{ [hold_start_brightness + (255 / scaled_ramp_time * (as_timestamp(now()) - hold_start_time)), 255] | min | round(0) | int }}"
+                  transition: "{{ release_transition }}"
+            else:
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ wall_lights }}"
+                data:
+                  brightness_step_pct: "{{ wall_long_step }}"
+
+      # Down switch long press: dim down, never below 1% (smooth with hold sensor, else one step)
+      - conditions:
+          - condition: template
+            value_template: >
+              {{ trigger.id == 'wall_down'
+                 and trigger.to_state.attributes.event_type in wall_updown_long_types }}
+          - condition: template
+            value_template: "{{ wall_lights | select('is_state', 'on') | list | length > 0 }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ wall_down_hold | select('is_state', 'on') | list | length > 0 }}"
+            then:
+              - variables:
+                  hold_start_time: "{{ as_timestamp(now()) - latency_compensation_offset }}"
+                  hold_start_brightness: "{{ state_attr(wall_ref, 'brightness') or wall_min_brightness }}"
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ wall_lights | select('is_state', 'on') | list }}"
+                data:
+                  brightness: "{{ wall_min_brightness }}"
+                  transition: "{{ ([hold_start_brightness - wall_min_brightness, 0] | max / 255) * scaled_ramp_time }}"
+              - wait_template: "{{ wall_down_hold | select('is_state', 'on') | list | length == 0 }}"
+                timeout: 30
+              - action: light.turn_on
+                target:
+                  entity_id: "{{ wall_lights | select('is_state', 'on') | list }}"
+                data:
+                  brightness: "{{ [hold_start_brightness - (255 / scaled_ramp_time * (as_timestamp(now()) - hold_start_time)), wall_min_brightness] | max | round(0) | int }}"
+                  transition: "{{ release_transition }}"
+            else:
+              - repeat:
+                  for_each: "{{ wall_lights | select('is_state', 'on') | list }}"
+                  sequence:
+                    - action: light.turn_on
+                      target:
+                        entity_id: "{{ repeat.item }}"
+                      data:
+                        brightness_pct: "{{ [((state_attr(repeat.item, 'brightness') or 255) / 255 * 100 - wall_long_step) | round(0) | int, 1] | max }}"
