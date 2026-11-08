@@ -5,6 +5,14 @@ blueprint:
     Use an IKEA BILRESA scroll wheel (Matter) as a 3-channel remote, plus an
     optional Shelly wall switch in detached / button mode on the same light.
 
+    Version: 1.1.0
+
+    1.1.0 fixes two failures found on HA 2026.11 with instant scrolling:
+    the position check compared the sensor state to the strings "1" and
+    "1.0" after Home Assistant had already turned that result into the
+    number 1, and sensor discovery could select a battery entity whose id
+    merely ended in _2. Details are under "Instant scroll" and "Entities".
+
     Credit: device discovery, relaxed vs instant scrolling, and the
     multi_press count handling follow jhol-byte's "Ikea_bilresa_scroll_wheel"
     (https://gist.github.com/jhol-byte/b2731a4d2476f530d76b9ff409f7f3a4,
@@ -34,11 +42,13 @@ blueprint:
     the device. The Matter fixture has no endpoint for it. Home Assistant only
     sees the wheel and the centre button for whichever channel is selected.
 
-    Entities are found from the device. Default ids from the core fixture are
-    event.<slug>_button_1 .. _button_9 and, for instant mode,
-    sensor.<slug>_current_switch_position_1 .. _9. Discovery matches the
-    numeric suffix, so a renamed entity still works when the id ends in _1 .. _9
-    (an optional _2 duplicate suffix is allowed). Do not drop that suffix.
+    Entities are found from the device. Home Assistant templates cannot read
+    an entity's unique_id, so this cannot match the Matter endpoint number
+    inside the registry id. It matches the English object-id HA generates:
+    event.<slug>_button_<N> and sensor.<slug>_current_switch_position_<N>.
+    A duplicate suffix is allowed (current_switch_position_2_2 still matches
+    channel 1 counter-clockwise). Do not rename those fragments away.
+    battery_2 is not a position sensor and is ignored.
 
     Scroll evaluation:
     - Relaxed (default): when a gesture ends, Matter sends one event whose
@@ -49,6 +59,11 @@ blueprint:
       (entity_registry_enabled_default is false). Enable positions 1, 2, 4, 5,
       7 and 8. Instant mode follows spins longer than 8 detents. Shorten the
       transition if the queue starts to lag behind the wheel.
+      The comparison is numeric (float == 1). A rendered "1" is stored as
+      the number 1, so a test against the strings "1" or "1.0" never matches.
+      The same parser leaves multi_press_1, clockwise, and ch1 as text,
+      because those are not Python literals. Counts and 0/1 flags are already
+      compared as numbers.
 
     Channels (clockwise is brighter / higher hue / cooler white / louder):
     - Channel 1: centre button single press toggles the light. The wheel
@@ -63,19 +78,24 @@ blueprint:
       A scroll action can use scroll_clicks (integer, 1 in instant mode) and
       scroll_direction ("clockwise" or "counter_clockwise").
 
-    Wall switch, when an event entity is selected:
+    Wall switch, when an event entity is selected. Check the entity's
+    event_types list in Developer Tools; the blueprint can only react to
+    types that entity actually emits.
     - Single press (single, single_push, or S) toggles the light. Any selected
       light on means all off, otherwise all on.
-    - Double press (double, double_push, or SS) turns the light on at the
-      warm-white colour temperature (default 2700 K). The light must support
-      colour temperature.
-    - Hold dims. Gen2+ long_push is the start, not btn_down: btn_down is also
-      sent for a normal click, so ramping on btn_down would move the light on
-      every toggle. While the event_type attribute stays long_push the
-      brightness steps; btn_up replaces that attribute on release and the ramp
-      stops. Gen1 long has no btn_up, so it applies one step unless a hold
-      binary_sensor is on, in which case the same ramp runs until the sensor
-      turns off. The ramp never turns the light off.
+    - Double press turns the light on at the warm-white colour temperature
+      (default 2700 K). The light must support colour temperature. This needs
+      a double event type: Gen2+ emits double_push; some Gen1 devices emit
+      double. A Shelly Gen1 event entity whose event_types are only
+      single and long has no double and no btn_up, so a second click is another
+      toggle and warm white never runs. Use a Gen2+ Shelly, or add whatever
+      double type your device really emits, to get warm white.
+    - Hold dims, and never turns the light off. Gen2+ long_push starts the
+      ramp (not btn_down: that also fires for a normal click). The ramp
+      repeats while event_type stays long_push; btn_up replaces it on release
+      and the ramp stops. Gen1 long has no btn_up. On a single/long-only
+      Gen1 entity, hold is one brightness step unless you set a hold
+      binary_sensor that stays on while the switch is held.
     - Auto direction brightens until the light is at or above the reverse point
       (default 90%), and the next hold dims. Up and Down force the direction.
 
@@ -503,8 +523,10 @@ blueprint:
         wall_double_types:
           name: Event types that set warm white
           description: >
-            Gen1 "double", Gen2+ "double_push", Button1 "SS". Turns the light on
-            if it is off.
+            Turns the light on at Warm white if it is off. Gen2+ emits
+            double_push. A Gen1 entity that only lists single and long never
+            emits these, so warm white does not run on that switch. Add a type
+            here only if it appears in the entity's event_types.
           default:
             - double
             - double_push
@@ -605,8 +627,9 @@ blueprint:
         wall_long_step:
           name: One-shot dim step
           description: >
-            Used for Gen1 "long" / "L" when no hold sensor is on, and if
-            long_push does not stay latched. Default 20%.
+            Gen1 "long" / "L" when no hold sensor is on. A Shelly that only
+            emits single and long cannot ramp, because nothing marks the
+            release. This one step is what a hold does then. Default 20%.
           default: 20
           selector:
             number:
@@ -617,11 +640,12 @@ blueprint:
         wall_hold_sensors:
           name: Hold sensors (optional)
           description: >
-            binary_sensor that is on while the switch is physically held (often
-            the Shelly input binary_sensor of that detached input). When one of
-            these is on as the long event arrives, the ramp follows the sensor
-            instead of event_type. Leave empty if you only have the event entity.
-            Confirm the sensor actually tracks the hold before relying on it.
+            binary_sensor that is on while the switch is physically held.
+            Required for a smooth ramp on Gen1 (event types single and long
+            only): there is no btn_up to end a ramp. When one of these is on
+            as the long event arrives, the ramp follows the sensor. Leave
+            empty on Gen2+ if long_push stays set until btn_up. Confirm the
+            sensor tracks the hold before relying on it.
           default: []
           selector:
             entity:
@@ -695,14 +719,17 @@ variables:
   wall_ref: "{{ wall_target.split(', ')[0] }}"
   min_brightness: "{{ [1, (brightness_min_pct / 100 * 255) | round(0) | int] | max }}"
 
-# Same discovery idea as jhol-byte: trigger_variables can call device_entities.
-# Suffix _N, or _N_<digits> when HA had to deduplicate the id. Shortest match wins.
+# device_entities() returns entity ids only. Templates cannot read unique_id,
+# so the Matter endpoint buried in it is not available here. Match the object
+# id HA builds from the English name: button_<N> and current_switch_position_<N>,
+# plus an optional _<digits> duplicate suffix. Shortest match wins, which keeps
+# button_2 ahead of button_2_2 and ignores battery_2.
 trigger_variables:
   var_remote: !input remote
   var_button_ch1: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_3(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_3(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -711,7 +738,7 @@ trigger_variables:
   var_scroll_ccw_ch1: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_2(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_2(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -720,7 +747,7 @@ trigger_variables:
   var_scroll_cw_ch1: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_1(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_1(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -729,7 +756,7 @@ trigger_variables:
   var_scroll_ccw_ext_ch1: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_2(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_2(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -738,7 +765,7 @@ trigger_variables:
   var_scroll_cw_ext_ch1: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_1(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_1(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -747,7 +774,7 @@ trigger_variables:
   var_button_ch2: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_6(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_6(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -756,7 +783,7 @@ trigger_variables:
   var_scroll_ccw_ch2: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_5(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_5(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -765,7 +792,7 @@ trigger_variables:
   var_scroll_cw_ch2: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_4(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_4(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -774,7 +801,7 @@ trigger_variables:
   var_scroll_ccw_ext_ch2: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_5(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_5(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -783,7 +810,7 @@ trigger_variables:
   var_scroll_cw_ext_ch2: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_4(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_4(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -792,7 +819,7 @@ trigger_variables:
   var_button_ch3: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_9(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_9(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -801,7 +828,7 @@ trigger_variables:
   var_scroll_ccw_ch3: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_8(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_8(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -810,7 +837,7 @@ trigger_variables:
   var_scroll_cw_ch3: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^event\..+[a-zA-Z]_7(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^event\..+_button_7(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -819,7 +846,7 @@ trigger_variables:
   var_scroll_ccw_ext_ch3: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_8(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_8(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -828,7 +855,7 @@ trigger_variables:
   var_scroll_cw_ext_ch3: >-
     {% set ns = namespace(found='') %}
     {% for item in device_entities(var_remote) %}
-    {% set match = item | regex_findall(find='^sensor\..+[a-zA-Z]_7(?:_[0-9]+)?$') %}
+    {% set match = item | regex_findall(find='^sensor\..+_current_switch_position_7(?:_[0-9]+)?$') %}
     {% if (match | length) > 0 and (ns.found == '' or (match[0] | length) < (ns.found | length)) %}
     {% set ns.found = match[0] %}
     {% endif %}
@@ -938,7 +965,8 @@ conditions:
       {% elif old is not none and old.state == 'unavailable' %}
         {{ false }}
       {% elif '_ext_' in tid %}
-        {{ scroll_evaluation == 'instant' and new.state in ['1', '1.0'] }}
+        {# State is text here. float still accepts "1", "1.0", 1 and 1.0. #}
+        {{ scroll_evaluation == 'instant' and (new.state | float(-1)) == 1 }}
       {% elif tid.startswith('scroll_') %}
         {{ scroll_evaluation == 'relaxed' }}
       {% else %}
@@ -1080,8 +1108,11 @@ actions:
                 'scroll_cw_ext_ch2', 'scroll_ccw_ext_ch2',
                 'scroll_cw_ext_ch3', 'scroll_ccw_ext_ch3'
               ] %}
-              {{ (scroll_evaluation == 'relaxed' and tid in relaxed_ids and event_type.startswith('multi_press_'))
-                 or (scroll_evaluation == 'instant' and tid in instant_ids and to_state_value in ['1', '1.0']) }}
+              {# to_state_value is re-parsed by HA. A rendered "1" becomes int 1,
+                 so a string membership test is never true. Compare as a number.
+                 float("1.0") works; int("1.0") does not. #}
+              {{ (scroll_evaluation == 'relaxed' and tid in relaxed_ids and event_type is string and event_type.startswith('multi_press_'))
+                 or (scroll_evaluation == 'instant' and tid in instant_ids and (to_state_value | float(-1)) == 1) }}
         sequence:
           - variables:
               scroll_channel: "{{ 'ch1' if '_ch1' in trigger.id else ('ch2' if '_ch2' in trigger.id else 'ch3') }}"
